@@ -1,12 +1,3 @@
-document.addEventListener('DOMContentLoaded', () => {
-  // Automatically retrieve saved key from local browser storage
-  chrome.storage.local.get(['gemini_key'], (res) => {
-    if (res?.gemini_key) {
-      document.getElementById('apiKey').value = res.gemini_key;
-    }
-  });
-});
-
 document.getElementById('applyBtn').addEventListener('click', async () => {
   const apiKey = document.getElementById('apiKey').value.trim();
   const promptText = document.getElementById('prompt').value.trim();
@@ -18,12 +9,10 @@ document.getElementById('applyBtn').addEventListener('click', async () => {
     return;
   }
 
-  // Save the key locally so you don't have to enter it again
   chrome.storage.local.set({ gemini_key: apiKey });
   statusEl.textContent = 'Asking AI to generate styles...';
   statusEl.style.color = '#0a84ff';
 
-  // Send request to background script
   chrome.runtime.sendMessage({ action: "generateStyles", apiKey, promptText }, async (response) => {
     if (chrome.runtime.lastError) {
       statusEl.textContent = 'Error: ' + chrome.runtime.lastError.message;
@@ -41,7 +30,8 @@ document.getElementById('applyBtn').addEventListener('click', async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       await chrome.scripting.insertCSS({
         target: { tabId: tab.id },
-        css: response.css
+        css: response.css,
+        origin: 'USER' // Forces the CSS to override website styles
       });
 
       statusEl.textContent = 'Styles applied!';
