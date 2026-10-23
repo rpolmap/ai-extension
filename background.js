@@ -1,21 +1,42 @@
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const MODEL = "llama-3.3-70b-versatile";
+const GROQ_BASE = "https://api.groq.com/openai/v1";
 const MAX_DUMP_CHARS = 12000;
+
+// Best first. Used only if your key has access to them.
+const PREFERRED_MODELS = [
+  "llama-3.3-70b-versatile",
+  "openai/gpt-oss-120b",
+  "openai/gpt-oss-20b",
+  "llama-3.1-8b-instant"
+];
+const EXCLUDE = /whisper|tts|guard|orpheus|embed|prompt-guard|compound/i;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "generateStyles") {
     executePipeline(request)
       .then(css => sendResponse({ success: true, css }))
       .catch(err => sendResponse({ success: false, error: err.message }));
-    return true; // keep channel open for async response
+    return true;
   }
 });
 
+async function pickModel(apiKey) {
+  const res = await fetch(GROQ_BASE + "/models", {
+    headers: { "Authorization": "Bearer " + apiKey.trim() }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error?.message || "Could not list Groq models (status " + res.status + ").");
+  }
+  const ids = (data.data || []).map(m => m.id);
+  for (const m of PREFERRED_MODELS) if (ids.includes(m)) return m;
+  const fallback = ids.find(id => !EXCLUDE.test(id));
+  if (!fallback) throw new Error("No usable chat models available for this API key.");
+  return fallback;
+}
+
 function extractCss(text) {
-  // Prefer content inside a code fence if the model added one
   const fenced = text.match(/```(?:css)?\s*([\s\S]*?)```/i);
   let css = fenced ? fenced[1] : text;
-  // Drop any chatter before the first rule
   const firstBrace = css.indexOf("{");
   if (firstBrace === -1) return "";
   const lastBrace = css.lastIndexOf("}");
@@ -25,6 +46,8 @@ function extractCss(text) {
 }
 
 async function executePipeline({ apiKey, promptText, fullDomDump, url }) {
+  const model = await pickModel(apiKey);
+
   const systemPrompt =
     "You are an expert web developer who writes CSS.\n" +
     "You receive an outline of a web page (interactive elements and DOM hierarchy) and a styling request.\n\n" +
@@ -41,14 +64,14 @@ async function executePipeline({ apiKey, promptText, fullDomDump, url }) {
     "User Design Request: " + promptText + "\n\n" +
     "Page outline:\n" + dump;
 
-  const response = await fetch(GROQ_URL, {
+  const response = await fetch(GROQ_BASE + "/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Authorization": "Bearer " + apiKey.trim()
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage }
@@ -65,13 +88,11 @@ async function executePipeline({ apiKey, promptText, fullDomDump, url }) {
   }
 
   if (!response.ok) {
-    throw new Error(data.error?.message || "Groq API request failed with status " + response.status);
+    throw new Error("[" + model + "] " + (data.error?.message || "request failed with status " + response.status));
   }
 
   const raw = data.choices?.[0]?.message?.content || "";
   const css = extractCss(raw);
-  if (!css) {
-    throw new Error("API returned no usable CSS.");
-  }
+  if (!css) throw new Error("[" + model + "] returned no usable CSS.");
   return css;
 }
