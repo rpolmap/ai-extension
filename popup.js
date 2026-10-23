@@ -1,3 +1,8 @@
+// Force !important on every declaration so site styles can't override ours
+function forceImportant(css) {
+  return css.replace(/([a-z-]+\s*:\s*[^;{}]+?)(\s*!important)?\s*(?=;|})/gi, '$1 !important');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // Load saved Groq key on startup
   chrome.storage.local.get(['groq_key'], (res) => {
@@ -46,9 +51,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         await chrome.scripting.insertCSS({
           target: { tabId: tab.id },
-          css: response.css
+          css: forceImportant(response.css)
         });
 
+        console.log('Injected CSS:', forceImportant(response.css));
         statusEl.textContent = 'Styles applied!';
         statusEl.style.color = '#30d158';
 
