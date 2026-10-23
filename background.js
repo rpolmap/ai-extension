@@ -17,7 +17,7 @@ async function callGroqAPI(apiKey, promptText) {
       "Authorization": "Bearer " + apiKey.trim()
     },
     body: JSON.stringify({
-      model: "llama-3.3-70b-versatile",
+      model: "llama-3.1-8b-instant", // Updated to active model identifier
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: promptText }
