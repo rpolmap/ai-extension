@@ -1,44 +1,36 @@
-document.getElementById('applyBtn').addEventListener('click', async () => {
-  const apiKey = document.getElementById('apiKey').value.trim();
-  const promptText = document.getElementById('prompt').value.trim();
-  const statusEl = document.getElementById('status');
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "generateStyles") {
+    callGroqAPI(request.apiKey, request.promptText)
+      .then(css => sendResponse({ success: true, css }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true; // Keeps message channel open for async response
+  }
+});
 
-  if (!apiKey || !promptText) {
-    statusEl.textContent = 'Please fill in both fields.';
-    statusEl.style.color = '#ff453a';
-    return;
+async function callGroqAPI(apiKey, promptText) {
+  const systemPrompt = "You are a CSS generator. Return ONLY raw, valid CSS code to fulfill the user's request on a webpage. Do not include markdown codeblocks, explanations, or comments. Return pure CSS rules only.";
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: promptText }
+      ],
+      temperature: 0.2
+    })
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error?.message || "Groq API request failed.");
   }
 
-  chrome.storage.local.set({ gemini_key: apiKey });
-  statusEl.textContent = 'Asking AI to generate styles...';
-  statusEl.style.color = '#0a84ff';
-
-  chrome.runtime.sendMessage({ action: "generateStyles", apiKey, promptText }, async (response) => {
-    if (chrome.runtime.lastError) {
-      statusEl.textContent = 'Error: ' + chrome.runtime.lastError.message;
-      statusEl.style.color = '#ff453a';
-      return;
-    }
-
-    if (!response || !response.success) {
-      statusEl.textContent = 'Error: ' + (response?.error || 'Unknown error');
-      statusEl.style.color = '#ff453a';
-      return;
-    }
-
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      await chrome.scripting.insertCSS({
-        target: { tabId: tab.id },
-        css: response.css,
-        origin: 'USER' // Forces the CSS to override website styles
-      });
-
-      statusEl.textContent = 'Styles applied!';
-      statusEl.style.color = '#30d158';
-    } catch (err) {
-      statusEl.textContent = 'Injection Error: ' + err.message;
-      statusEl.style.color = '#ff453a';
-    }
-  });
-});
+  let rawCss = data.choices?.[0]?.message?.content || "";
+  return rawCss.replace(/```css/g, "").replace(/```/g, "").trim();
+}
