@@ -5,7 +5,8 @@
   "description": "Modify any website's styling using natural language prompts.",
   "permissions": [
     "activeTab",
-    "scripting"
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
     "https://*/*",
@@ -13,5 +14,8 @@
   ],
   "action": {
     "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
   }
 }
