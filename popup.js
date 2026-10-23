@@ -1,4 +1,5 @@
 document.addEventListener('DOMContentLoaded', () => {
+  // Automatically retrieve saved key from local browser storage
   chrome.storage.local.get(['gemini_key'], (res) => {
     if (res?.gemini_key) {
       document.getElementById('apiKey').value = res.gemini_key;
@@ -17,11 +18,12 @@ document.getElementById('applyBtn').addEventListener('click', async () => {
     return;
   }
 
+  // Save the key locally so you don't have to enter it again
   chrome.storage.local.set({ gemini_key: apiKey });
   statusEl.textContent = 'Asking AI to generate styles...';
   statusEl.style.color = '#0a84ff';
 
-  // Send request to background worker
+  // Send request to background script
   chrome.runtime.sendMessage({ action: "generateStyles", apiKey, promptText }, async (response) => {
     if (chrome.runtime.lastError) {
       statusEl.textContent = 'Error: ' + chrome.runtime.lastError.message;
