@@ -24,7 +24,7 @@ function inspectPageStructure() {
     let desc = `${el.tagName.toLowerCase()}`;
     if (el.id) desc += `#${el.id}`;
     if (el.className && typeof el.className === 'string') desc += `.${el.className.trim().replace(/\s+/g, '.')}`;
-    const text = (el.innerText || el.value || el.placeholder || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+    const text = (el.innerText || el.placeholder || '').trim().replace(/\s+/g, ' ').slice(0, 30);
     if (text) desc += ` "${text}"`;
     dump.push(`[${idx}] ${desc}`);
   });
@@ -112,12 +112,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
         logToTerminal("Injecting custom styles into page...", "dim");
 
-        // Inject the generated CSS into active tab
-        await chrome.scripting.insertCSS({
-          target: { tabId: tab.id },
-          css: response.css,
-          origin: 'USER'
-        });
+        try {
+          // Remove CSS applied by a previous run on this tab
+          const key = 'applied_css_' + tab.id;
+          const prev = (await chrome.storage.session.get(key))[key];
+          if (prev) {
+            await chrome.scripting.removeCSS({
+              target: { tabId: tab.id },
+              css: prev,
+              origin: 'USER'
+            }).catch(() => {});
+          }
+
+          await chrome.scripting.insertCSS({
+            target: { tabId: tab.id },
+            css: response.css,
+            origin: 'USER'
+          });
+          await chrome.storage.session.set({ [key]: response.css });
+        } catch (e) {
+          logToTerminal("Inject Error: " + e.message, "err");
+          return;
+        }
 
         logToTerminal("SUCCESS: Styles applied!", "info");
 
