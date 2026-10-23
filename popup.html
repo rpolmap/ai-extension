@@ -54,7 +54,7 @@
             letter-spacing: 0.05em;
         }
 
-        input[type="password"], textarea {
+        input[type="password"], textarea, select {
             width: 100%;
             padding: 0.75rem 0.9rem;
             font: inherit;
@@ -67,7 +67,7 @@
             transition: border-color .2s;
         }
 
-        input[type="password"]:focus, textarea:focus {
+        input[type="password"]:focus, textarea:focus, select:focus {
             border-color: var(--fg);
         }
 
@@ -78,6 +78,21 @@
 
         input::placeholder, textarea::placeholder {
             color: var(--muted);
+        }
+
+        select option { 
+            background: var(--panel); 
+            color: var(--fg); 
+        }
+
+        .check {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            text-transform: none;
+            letter-spacing: 0;
+            font-weight: 500;
+            cursor: pointer;
         }
 
         .dash-btn {
@@ -123,6 +138,18 @@
         <label for="prompt">Style Prompt</label>
         <textarea id="prompt" placeholder="e.g. Make background dark gray and text white"></textarea>
     </div>
+
+    <div class="input-group">
+        <label for="mode">Mode</label>
+        <select id="mode">
+            <option value="edit">Edit this page (keeps all functions)</option>
+            <option value="clone">Clone into new tab (static copy)</option>
+        </select>
+    </div>
+
+    <label class="check" id="stripRow" style="display:none">
+        <input type="checkbox" id="stripStyles"> Remove the site's original styles
+    </label>
 
     <button class="dash-btn" id="applyBtn" type="button">Apply Changes</button>
     <div id="status"></div>
