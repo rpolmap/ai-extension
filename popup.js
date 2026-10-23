@@ -52,6 +52,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         statusEl.textContent = 'Styles applied!';
         statusEl.style.color = '#30d158';
+
+        // Automatically close the popup after a brief moment so you return to the page
+        setTimeout(() => {
+          window.close();
+        }, 400);
+
       } catch (err) {
         statusEl.textContent = 'Injection Error: ' + err.message;
         statusEl.style.color = '#ff453a';
