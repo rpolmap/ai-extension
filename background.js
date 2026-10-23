@@ -17,7 +17,7 @@ async function callGroqAPI(apiKey, promptText) {
       "Authorization": "Bearer " + apiKey.trim()
     },
     body: JSON.stringify({
-      model: "llama-3.1-8b-instant", // Updated to active model identifier
+      model: "openai/gpt-oss-20b", // Updated to current active Groq model ID
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: promptText }
