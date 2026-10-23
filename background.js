@@ -1,30 +1,36 @@
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "generateStyles") {
-    callGeminiAPI(request.apiKey, request.promptText)
+    callGroqAPI(request.apiKey, request.promptText)
       .then(css => sendResponse({ success: true, css }))
       .catch(err => sendResponse({ success: false, error: err.message }));
-    return true; // Keeps channel open for async response
+    return true; 
   }
 });
 
-async function callGeminiAPI(apiKey, promptText) {
+async function callGroqAPI(apiKey, promptText) {
   const systemPrompt = "You are a CSS generator. Return ONLY raw, valid CSS code to fulfill the user's request on a webpage. Do not include markdown codeblocks, explanations, or comments. Return pure CSS rules only.";
-  
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + apiKey.trim()
+    },
     body: JSON.stringify({
-      contents: [
-        { role: 'user', parts: [{ text: `${systemPrompt}\n\nUser request: ${promptText}` }] }
-      ]
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: promptText }
+      ],
+      temperature: 0.2
     })
   });
 
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data.error?.message || 'API request failed.');
+    throw new Error(data.error?.message || "Groq API failed with status " + response.status);
   }
 
-  let rawCss = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  return rawCss.replace(/```css/g, '').replace(/```/g, '').trim();
+  let rawCss = data.choices?.[0]?.message?.content || "";
+  return rawCss.replace(/```css/g, "").replace(/```/g, "").trim();
 }
