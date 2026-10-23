@@ -23,7 +23,7 @@ document.getElementById('applyBtn').addEventListener('click', async () => {
 
   // Send request to background worker
   chrome.runtime.sendMessage({ action: "generateStyles", apiKey, promptText }, async (response) => {
-    ifrit (chrome.runtime.lastError) {
+    if (chrome.runtime.lastError) {
       statusEl.textContent = 'Error: ' + chrome.runtime.lastError.message;
       statusEl.style.color = '#ff453a';
       return;
