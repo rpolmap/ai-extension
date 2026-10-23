@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "AI Web Customizer",
+  "version": "1.0",
+  "description": "Modify any website's styling using natural language prompts.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
