@@ -46,8 +46,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         await chrome.scripting.insertCSS({
           target: { tabId: tab.id },
-          css: response.css,
-          origin: 'USER'
+          css: response.css
         });
 
         statusEl.textContent = 'Styles applied!';
