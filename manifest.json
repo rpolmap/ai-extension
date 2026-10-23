@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AI Web Customizer",
   "version": "1.1",
-  "description": "Modify webpage styling using natural language prompts, or restyle a copy of the page in a new tab.",
+  "description": "Modify webpage styling using natural language prompts.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -11,7 +11,8 @@
   ],
   "host_permissions": [
     "https://*/*",
-    "http://*/*"
+    "http://*/*",
+    "https://api.groq.com/*"
   ],
   "action": {
     "default_popup": "popup.html"
