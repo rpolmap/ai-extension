@@ -8,7 +8,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 async function callGroqAPI(apiKey, promptText) {
-  const systemPrompt = "You are a CSS generator. Return ONLY raw, valid CSS code to fulfill the user's request on a webpage. Do not include markdown codeblocks, explanations, or comments. Return pure CSS rules only.";
+  const systemPrompt = "You are a CSS generator. Return ONLY raw, valid CSS code to fulfill the user's request on a webpage. Do not include markdown codeblocks, explanations, or comments. Return pure CSS rules only. Mark every declaration !important so it overrides the site's own styles.";
 
   const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -22,7 +22,9 @@ async function callGroqAPI(apiKey, promptText) {
         { role: "system", content: systemPrompt },
         { role: "user", content: promptText }
       ],
-      temperature: 0.2
+      temperature: 0.2,
+      reasoning_effort: "low",
+      max_completion_tokens: 4000
     })
   });
 
@@ -32,5 +34,9 @@ async function callGroqAPI(apiKey, promptText) {
   }
 
   let rawCss = data.choices?.[0]?.message?.content || "";
-  return rawCss.replace(/```css/g, "").replace(/```/g, "").trim();
+  rawCss = rawCss.replace(/```css/g, "").replace(/```/g, "").trim();
+  if (!rawCss) {
+    throw new Error("The model returned empty CSS. Try again or rephrase.");
+  }
+  return rawCss;
 }
