@@ -17,6 +17,31 @@ const EXCLUDE = /whisper|tts|guard|orpheus|embed|prompt-guard|compound/i;
 const $ = (id) => document.getElementById(id);
 const frame = $('replica');
 
+// index.html (the website demo) has a URL box; app.html (the extension editor) does not.
+const IS_DEMO = !!$('urlInput');
+
+// Same code works as an extension page (chrome.storage) and as a normal website (localStorage).
+const HAS_CHROME_STORAGE = typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.storage.local;
+const store = {
+  async get(keys) {
+    if (HAS_CHROME_STORAGE) return chrome.storage.local.get(keys);
+    const out = {};
+    [].concat(keys).forEach((k) => {
+      try {
+        const v = localStorage.getItem('awc_' + k);
+        if (v !== null) out[k] = JSON.parse(v);
+      } catch (e) { /* ignore */ }
+    });
+    return out;
+  },
+  async set(obj) {
+    if (HAS_CHROME_STORAGE) return chrome.storage.local.set(obj);
+    for (const k in obj) {
+      try { localStorage.setItem('awc_' + k, JSON.stringify(obj[k])); } catch (e) { /* ignore */ }
+    }
+  }
+};
+
 const state = {
   id: null,
   url: '',
@@ -46,14 +71,15 @@ function log(msg, type = 'normal') {
 // ---------------------------------------------------------------------------
 // Editor box: open / minimize
 // ---------------------------------------------------------------------------
-function openPanel() { document.body.classList.remove('min'); $('prompt').focus(); }
-function minimizePanel() { document.body.classList.add('min'); }
-function setPill(text) { $('pillText').textContent = text; }
+function openPanel() { if (IS_DEMO) return; document.body.classList.remove('min'); $('prompt').focus(); }
+function minimizePanel() { if (IS_DEMO) return; document.body.classList.add('min'); }
+function setPill(text) { if ($('pillText')) $('pillText').textContent = text; }
 
 function setBusy(b) {
   state.busy = b;
   document.body.classList.toggle('busy', b);
   $('applyBtn').disabled = b;
+  if ($('loadBtn')) $('loadBtn').disabled = b;
   $('applyBtn').textContent = b ? 'Working…' : 'Apply Changes';
   setPill(b ? 'Working…' : 'Edit style');
   updateControls();
@@ -86,6 +112,7 @@ function render() {
   const old = state.blobUrl;
   state.blobUrl = url;
   frame.src = url;
+  if ($('phoneEmpty')) $('phoneEmpty').hidden = true;
   if (old) setTimeout(() => URL.revokeObjectURL(old), 5000);
   updateControls();
 }
@@ -102,7 +129,7 @@ frame.addEventListener('load', () => {
 
 function openExternal(url) {
   log('Opening ' + url, 'dim');
-  if (chrome.tabs && chrome.tabs.create) chrome.tabs.create({ url });
+  if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) chrome.tabs.create({ url });
   else window.open(url, '_blank', 'noopener');
 }
 
@@ -554,7 +581,8 @@ async function generatePage({ apiKey, promptText, outline, url }) {
 // Apply / undo / redo / persistence
 // ---------------------------------------------------------------------------
 function persist() {
-  chrome.storage.local.set({
+  if (IS_DEMO) return;
+  store.set({
     [state.id + '_edits']: {
       index: state.index,
       edits: state.versions.slice(1).map((v) => ({ prompt: v.prompt, html: v.html }))
@@ -571,7 +599,8 @@ async function applyChanges() {
     log('ERROR: Key and prompt required.', 'err');
     return;
   }
-  chrome.storage.local.set({ groq_key: apiKey });
+  if (!state.versions.length) { log('ERROR: Load a website URL first.', 'err'); return; }
+  store.set({ groq_key: apiKey });
   setBusy(true);
   let ok = false;
 
@@ -627,21 +656,116 @@ function goTo(index) {
 }
 
 // ---------------------------------------------------------------------------
+// Demo only (index.html): download a website by URL and turn it into the replica
+// ---------------------------------------------------------------------------
+// Websites can't be read directly from another site, so if a direct request fails we go through public CORS proxies.
+const PROXIES = [
+  (u) => u,
+  (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  (u) => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+  (u) => 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(u)
+];
+
+async function fetchPageHtml(url) {
+  let lastErr = null;
+  for (let i = 0; i < PROXIES.length; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    try {
+      if (i > 0) log('Trying fallback route ' + i + '...', 'dim');
+      const res = await fetch(PROXIES[i](url), { signal: ctrl.signal });
+      if (!res.ok) throw new Error('status ' + res.status);
+      const text = await res.text();
+      if (!/<\s*(html|body|head|div|p)\b/i.test(text)) throw new Error('response was not an HTML page');
+      return text;
+    } catch (e) {
+      lastErr = e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error("Couldn't download that page (" + ((lastErr && lastErr.message) || 'unknown error') + '). The site may block outside access.');
+}
+
+// Same idea as captureReplica() in background.js, but for HTML text instead of a live tab
+function cleanFetchedHtml(rawHtml) {
+  const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+  doc.querySelectorAll(
+    'noscript, template, video, audio, canvas, picture source, ' +
+    'link[rel~="preload"], link[rel~="modulepreload"], link[rel~="prefetch"], link[rel~="preconnect"], link[rel~="dns-prefetch"]'
+  ).forEach((n) => n.remove());
+
+  doc.querySelectorAll('img').forEach((img) => {
+    const lazy = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
+    const cur = img.getAttribute('src') || '';
+    if (lazy && (!cur || /^data:/i.test(cur))) img.setAttribute('src', lazy);
+    if (!img.getAttribute('src')) {
+      const ss = img.getAttribute('srcset');
+      if (ss) img.setAttribute('src', ss.split(',')[0].trim().split(/\s+/)[0]);
+    }
+    ['srcset', 'sizes', 'loading'].forEach((a) => img.removeAttribute(a));
+  });
+
+  doc.querySelectorAll('*').forEach((el) => {
+    el.removeAttribute('integrity');
+    el.removeAttribute('crossorigin');
+    el.removeAttribute('nonce');
+  });
+  return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+}
+
+async function loadUrl(raw) {
+  if (state.busy) return;
+  let url = String(raw || '').trim();
+  if (!url) { log('ERROR: Enter a website URL first.', 'err'); return; }
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  try { url = new URL(url).href; } catch (e) { log('ERROR: That is not a valid URL.', 'err'); return; }
+
+  setBusy(true);
+  try {
+    log('Loading ' + url + ' ...', 'info');
+    const html = await fetchPageHtml(url);
+    const finalHtml = buildFinalHtml(cleanFetchedHtml(html), url);
+
+    state.id = 'demo';
+    state.url = url;
+    state.base = url;
+    state.versions = [{ prompt: 'Original', html: finalHtml }];
+    state.index = 0;
+    state.showOriginal = false;
+
+    $('urlInput').value = url;
+    render();
+    store.set({ demo_url: url });
+
+    const probe = new DOMParser().parseFromString(finalHtml, 'text/html');
+    if (((probe.body && probe.body.textContent) || '').trim().length < 200) {
+      log("This page looks almost empty: it probably builds itself with JavaScript, which the replica can't run.", 'dim');
+    }
+    log('SUCCESS: Replica of ' + new URL(url).hostname + ' is ready.', 'info');
+  } catch (err) {
+    log('Error: ' + err.message, 'err');
+  } finally {
+    setBusy(false);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 (async function init() {
-  const id = new URLSearchParams(location.search).get('id');
+  const id = IS_DEMO ? null : new URLSearchParams(location.search).get('id');
   const [recObj, savedObj, keyObj] = await Promise.all([
-    id ? chrome.storage.local.get(id) : Promise.resolve({}),
-    id ? chrome.storage.local.get(id + '_edits') : Promise.resolve({}),
-    chrome.storage.local.get('groq_key')
+    id ? store.get(id) : Promise.resolve({}),
+    id ? store.get(id + '_edits') : Promise.resolve({}),
+    store.get('groq_key')
   ]);
   const rec = id ? recObj[id] : null;
 
   if (keyObj && keyObj.groq_key) $('apiKey').value = keyObj.groq_key;
 
-  $('minBtn').addEventListener('click', minimizePanel);
-  $('pill').addEventListener('click', openPanel);
+  if ($('minBtn')) $('minBtn').addEventListener('click', minimizePanel);
+  if ($('pill')) $('pill').addEventListener('click', openPanel);
   $('applyBtn').addEventListener('click', applyChanges);
   $('undoBtn').addEventListener('click', () => { if (state.index > 0) goTo(state.index - 1); });
   $('redoBtn').addEventListener('click', () => { if (state.index < state.versions.length - 1) goTo(state.index + 1); });
@@ -649,6 +773,15 @@ function goTo(index) {
   $('prompt').addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') applyChanges();
   });
+
+  if (IS_DEMO) {
+    $('loadBtn').addEventListener('click', () => loadUrl($('urlInput').value));
+    $('urlInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadUrl($('urlInput').value); });
+    const last = await store.get('demo_url');
+    if (last && last.demo_url) $('urlInput').value = last.demo_url;
+    log('Demo ready. Enter your Groq API key, then load a website.', 'info');
+    return;
+  }
 
   if (!rec) { showFatal('This replica is no longer available. Click the extension icon on a website to open a new one.'); return; }
   if (rec.error) { showFatal(rec.error); return; }
