@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "AI Web Customizer",
-  "version": "1.2",
-  "description": "Modify webpage styling using natural language prompts.",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "version": "2.0",
+  "description": "Rebuild any webpage's HTML and CSS from a natural-language prompt, previewed live in a full replica.",
+  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage"],
   "host_permissions": ["https://api.groq.com/*"],
   "action": {
-    "default_popup": "popup.html"
+    "default_title": "Open AI Web Customizer"
   },
   "background": {
     "service_worker": "background.js"
