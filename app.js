@@ -2,8 +2,8 @@
 
 // ===== Settings you may want to tweak =====
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
-const MAX_INPUT_CHARS = 16000;   // how much of the page is sent to the AI (raise on a paid Groq plan)
-const MAX_OUTPUT_TOKENS = 5000;  // how long the rebuilt page may be (raise on a paid Groq plan)
+const MAX_INPUT_CHARS = 20000;   // how much of the page outline is sent to the AI (raise on a paid Groq plan)
+const MAX_OUTPUT_TOKENS = 3000;  // how long the AI's list of changes may be
 
 // Best first. Used only if your key has access to them.
 const PREFERRED_MODELS = [
@@ -158,160 +158,18 @@ function onFrameSubmit(e) {
 }
 
 // ---------------------------------------------------------------------------
-// Page -> compact text for the AI
+// Page preparation: sanitize + give every element a stable id (data-ai="N")
 // ---------------------------------------------------------------------------
-const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
-const DROP = new Set(['script', 'noscript', 'style', 'link', 'meta', 'title', 'base', 'template', 'iframe', 'object', 'embed', 'canvas', 'video', 'audio', 'source', 'track', 'head']);
-const KEEP_ATTRS = new Set(['id', 'href', 'src', 'alt', 'title', 'type', 'name', 'value', 'placeholder', 'action', 'method', 'for', 'role', 'aria-label', 'colspan', 'rowspan', 'checked', 'selected', 'disabled', 'required', 'data-href', 'formaction', 'min', 'max', 'rows', 'cols', 'maxlength']);
-const EMPTY_SKIP = new Set(['div', 'span', 'section', 'article', 'aside', 'header', 'footer', 'nav', 'main', 'p', 'ul', 'ol', 'li', 'i', 'b', 'em', 'strong', 'small']);
-const BLOCK = new Set(['div', 'section', 'article', 'aside', 'header', 'footer', 'nav', 'main', 'p', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'form', 'table', 'tr', 'figure', 'blockquote', 'pre']);
-
-const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const escAttr = (s) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-
-// keepStyle=false -> unstyled structure (original site). keepStyle=true -> full current page incl. CSS.
-// Long data-URIs, long values and inline <svg> icons are swapped for [[DATA:n]] / [[SVG:n]] tokens
-// so they don't eat the token budget; restoreAssets() puts them back afterwards.
-function buildOutline(html, { keepStyle, maxChars }) {
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  const assets = { svg: {}, data: {} };
-  let svgCount = 0;
-  let dataCount = 0;
-
-  const tokenizeData = (str) => str.replace(/data:[^\s"')]{80,}/gi, (m) => {
-    assets.data[++dataCount] = m;
-    return `[[DATA:${dataCount}]]`;
+function tagElements(doc) {
+  let max = 0;
+  doc.querySelectorAll('[data-ai]').forEach((e) => {
+    const n = parseInt(e.getAttribute('data-ai'), 10);
+    if (n > max) max = n;
   });
-
-  const attrsOf = (el) => {
-    let out = '';
-    for (const a of Array.from(el.attributes)) {
-      const n = a.name.toLowerCase();
-      const isStyleAttr = n === 'class' || n === 'style';
-      if (!KEEP_ATTRS.has(n) && !(keepStyle && isStyleAttr)) continue;
-      let v = a.value;
-      if (!isStyleAttr && (/^data:/i.test(v) || v.length > 300)) {
-        assets.data[++dataCount] = v;
-        v = `[[DATA:${dataCount}]]`;
-      } else {
-        v = tokenizeData(v);
-      }
-      out += ` ${n}="${escAttr(v)}"`;
-    }
-    return out;
-  };
-
-  const walk = (parent) => {
-    let out = '';
-    for (const node of Array.from(parent.childNodes)) {
-      if (node.nodeType === 3) {
-        const t = node.nodeValue.replace(/\s+/g, ' ');
-        if (!t.trim()) {
-          if (out && !/[\s>]$/.test(out)) out += ' ';
-          continue;
-        }
-        out += esc(t.length > 700 ? t.slice(0, 700) + '…' : t);
-        continue;
-      }
-      if (node.nodeType !== 1) continue;
-
-      const tag = node.tagName.toLowerCase();
-      if (tag === 'svg') {
-        const s = node.outerHTML;
-        if (s.length <= 6000) {
-          assets.svg[++svgCount] = s;
-          out += `[[SVG:${svgCount}]]`;
-        }
-        continue;
-      }
-      if (DROP.has(tag) || node.hasAttribute('hidden')) continue;
-
-      const a = attrsOf(node);
-      if (VOID.has(tag)) { out += `<${tag}${a}>`; continue; }
-
-      const inner = walk(node);
-      if (inner.trim() === '' && EMPTY_SKIP.has(tag) && (!keepStyle || a === '')) continue;
-
-      // Plain wrapper with a single child: drop the wrapper to save tokens
-      const onlyChild = node.children.length === 1 &&
-        !Array.from(node.childNodes).some((n) => n.nodeType === 3 && n.nodeValue.trim());
-      if ((tag === 'div' || tag === 'span') && a === '' && onlyChild) { out += inner; continue; }
-
-      out += `<${tag}${a}>${inner}</${tag}>`;
-      if (BLOCK.has(tag)) out += '\n';
-    }
-    return out;
-  };
-
-  let head = `<meta charset="utf-8">\n<title>${esc(doc.title || '')}</title>\n`;
-  if (keepStyle) {
-    doc.querySelectorAll('style').forEach((s) => { head += `<style>${tokenizeData(s.textContent)}</style>\n`; });
-    doc.querySelectorAll('link[rel~="stylesheet"]').forEach((l) => {
-      const h = l.getAttribute('href');
-      if (h) head += `<link rel="stylesheet" href="${escAttr(tokenizeData(h))}">\n`;
-    });
-  }
-  const bodyAttrs = keepStyle ? attrsOf(doc.body) : '';
-  let text = `<!DOCTYPE html>\n<html>\n<head>\n${head}</head>\n<body${bodyAttrs}>\n${walk(doc.body).trim()}\n</body>\n</html>`;
-
-  let truncated = false;
-  if (text.length > maxChars) {
-    truncated = true;
-    text = text.slice(0, maxChars);
-    const lt = text.lastIndexOf('>');
-    if (lt > 0) text = text.slice(0, lt + 1);
-    text += '\n<!-- the rest of the page was cut off -->';
-  }
-  return { text, assets, truncated };
-}
-
-// ---------------------------------------------------------------------------
-// AI output -> safe, working HTML document
-// ---------------------------------------------------------------------------
-function extractHtml(raw) {
-  let t = (raw || '').trim();
-  const fenced = t.match(/```(?:html)?\s*([\s\S]*?)(?:```|$)/i);
-  if (fenced) t = fenced[1];
-  const start = t.search(/<!doctype|<html|<head|<body|<style/i);
-  if (start === -1) return '';
-  t = t.slice(start);
-  const end = t.toLowerCase().lastIndexOf('</html>');
-  if (end !== -1) t = t.slice(0, end + 7);
-  return t.trim();
-}
-
-function restoreAssets(doc, assets) {
-  const fill = (s) => s.replace(/\[\[DATA:(\d+)\]\]/g, (m, n) => (assets.data[n] !== undefined ? assets.data[n] : ''));
-
-  const walker = doc.createTreeWalker(doc.documentElement, NodeFilter.SHOW_TEXT);
-  const texts = [];
-  while (walker.nextNode()) texts.push(walker.currentNode);
-
-  for (const t of texts) {
-    const parentName = t.parentNode ? t.parentNode.nodeName : '';
-    if (parentName === 'STYLE') { t.nodeValue = fill(t.nodeValue); continue; }
-    if (!/\[\[(?:SVG|DATA):\d+\]\]/.test(t.nodeValue)) continue;
-
-    const frag = doc.createDocumentFragment();
-    for (const part of t.nodeValue.replace(/\[\[DATA:\d+\]\]/g, '').split(/(\[\[SVG:\d+\]\])/)) {
-      const m = part.match(/^\[\[SVG:(\d+)\]\]$/);
-      if (m) {
-        if (assets.svg[m[1]]) {
-          const tpl = doc.createElement('template');
-          tpl.innerHTML = assets.svg[m[1]];
-          frag.appendChild(tpl.content);
-        }
-      } else if (part) {
-        frag.appendChild(doc.createTextNode(part));
-      }
-    }
-    t.parentNode.replaceChild(frag, t);
-  }
-
-  doc.querySelectorAll('*').forEach((el) => {
-    for (const a of Array.from(el.attributes)) {
-      if (a.value.includes('[[DATA:')) el.setAttribute(a.name, fill(a.value));
-    }
+  if (!doc.body) return;
+  doc.body.querySelectorAll('*').forEach((el) => {
+    if (el.tagName.toLowerCase() !== 'svg' && el.closest('svg')) return;   // only tag the <svg> root
+    if (!el.hasAttribute('data-ai')) el.setAttribute('data-ai', String(++max));
   });
 }
 
@@ -327,24 +185,19 @@ function fixHref(href) {
   return h;
 }
 
-// Parse -> restore icons/images -> strip anything executable -> fix links -> add <base>.
-// The editor page's CSP (script-src 'self') is a second wall: nothing inline can run in the replica anyway.
-function buildFinalHtml(rawHtml, { assets, baseUrl, fixLinks }) {
-  const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
-  if (assets) restoreAssets(doc, assets);
-
-  doc.querySelectorAll('script, iframe, frame, frameset, object, embed, applet, base, meta[http-equiv], meta[name="referrer"]').forEach((n) => n.remove());
-  doc.querySelectorAll('*').forEach((el) => {
+// Removes anything executable. The editor page's CSP (script-src 'self') is a second wall.
+function stripUnsafe(root) {
+  root.querySelectorAll('script, iframe, frame, frameset, object, embed, applet, base, meta[http-equiv], meta[name="referrer"]').forEach((n) => n.remove());
+  root.querySelectorAll('*').forEach((el) => {
     for (const a of Array.from(el.attributes)) {
       if (/^on/i.test(a.name) || /^\s*javascript:/i.test(a.value)) el.removeAttribute(a.name);
     }
   });
+}
 
-  if (fixLinks) {
-    doc.querySelectorAll('a[href]').forEach((a) => a.setAttribute('href', fixHref(a.getAttribute('href'))));
-    doc.querySelectorAll('[data-href]').forEach((el) => el.setAttribute('data-href', fixHref(el.getAttribute('data-href'))));
-    doc.querySelectorAll('form[action]').forEach((f) => f.setAttribute('action', fixHref(f.getAttribute('action'))));
-  }
+function buildFinalHtml(rawHtml, baseUrl) {
+  const doc = new DOMParser().parseFromString(rawHtml, 'text/html');
+  stripUnsafe(doc);
 
   const head = doc.head;
   const add = (tag, attrs) => {
@@ -357,7 +210,250 @@ function buildFinalHtml(rawHtml, { assets, baseUrl, fixLinks }) {
   add('base', { href: baseUrl });
   add('meta', { charset: 'utf-8' });
 
+  tagElements(doc);
   return '<!DOCTYPE html>\n' + doc.documentElement.outerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// Page -> compact outline for the AI (structure + ids + a few classes, no CSS)
+// ---------------------------------------------------------------------------
+const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
+const DROP = new Set(['script', 'noscript', 'style', 'link', 'meta', 'title', 'base', 'template', 'iframe', 'object', 'embed', 'canvas', 'video', 'audio', 'source', 'track', 'head']);
+const OUT_ATTRS = new Set(['id', 'href', 'src', 'alt', 'title', 'type', 'name', 'value', 'placeholder', 'action', 'method', 'for', 'role', 'aria-label', 'data-href']);
+const EMPTY_SKIP = new Set(['div', 'span', 'section', 'article', 'aside', 'header', 'footer', 'nav', 'main', 'p', 'ul', 'ol', 'li', 'i', 'b', 'em', 'strong', 'small']);
+const BLOCK = new Set(['div', 'section', 'article', 'aside', 'header', 'footer', 'nav', 'main', 'p', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'form', 'table', 'tr', 'figure', 'blockquote', 'pre']);
+
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escAttr = (s) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+const clip = (s, n) => (s.length > n ? s.slice(0, n) + '…' : s);
+
+function buildOutline(html, maxChars) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  const attrsOf = (el) => {
+    let out = el.hasAttribute('data-ai') ? ` data-ai="${el.getAttribute('data-ai')}"` : '';
+    const cls = (el.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
+    if (cls) out += ` class="${escAttr(cls)}"`;
+    for (const a of Array.from(el.attributes)) {
+      const n = a.name.toLowerCase();
+      if (!OUT_ATTRS.has(n)) continue;
+      const limit = (n === 'href' || n === 'data-href' || n === 'action') ? 100 : 60;
+      out += ` ${n}="${escAttr(clip(a.value, limit))}"`;
+    }
+    return out;
+  };
+
+  const walk = (parent) => {
+    let out = '';
+    for (const node of Array.from(parent.childNodes)) {
+      if (node.nodeType === 3) {
+        const t = node.nodeValue.replace(/\s+/g, ' ');
+        if (!t.trim()) {
+          if (out && !/[\s>]$/.test(out)) out += ' ';
+          continue;
+        }
+        out += esc(clip(t, 120));
+        continue;
+      }
+      if (node.nodeType !== 1) continue;
+
+      const tag = node.tagName.toLowerCase();
+      if (DROP.has(tag) || node.hasAttribute('hidden')) continue;
+      if (tag === 'svg') { out += `<svg${attrsOf(node)}></svg>`; continue; }
+
+      const a = attrsOf(node);
+      if (VOID.has(tag)) { out += `<${tag}${a}>`; continue; }
+
+      const inner = walk(node);
+      if (inner.trim() === '' && EMPTY_SKIP.has(tag)) continue;
+
+      out += `<${tag}${a}>${inner}</${tag}>`;
+      if (BLOCK.has(tag)) out += '\n';
+    }
+    return out;
+  };
+
+  let text = `<body${attrsOf(doc.body)}>\n${walk(doc.body).trim()}\n</body>`;
+  let truncated = false;
+  if (text.length > maxChars) {
+    truncated = true;
+    text = text.slice(0, maxChars);
+    const lt = text.lastIndexOf('>');
+    if (lt > 0) text = text.slice(0, lt + 1);
+    text += '\n<!-- the rest of the page was cut off -->';
+  }
+  return { text, truncated };
+}
+
+// ---------------------------------------------------------------------------
+// AI answer -> patch -> applied to the ORIGINAL page (everything else stays untouched)
+// ---------------------------------------------------------------------------
+function parsePatch(raw) {
+  const t = (raw || '').replace(/```[a-z]*\n?/gi, '');
+  const segs = t.split(/={2,}\s*(CSS|OPS)\s*={2,}/i);
+  let css = '';
+  let opsText = '';
+  for (let i = 1; i < segs.length; i += 2) {
+    if (segs[i].toUpperCase() === 'CSS') css = segs[i + 1] || '';
+    else opsText = segs[i + 1] || '';
+  }
+
+  const ops = [];
+  let badLines = 0;
+  const trimmed = opsText.trim();
+  let parsedAsArray = false;
+  if (trimmed.startsWith('[')) {
+    try { const arr = JSON.parse(trimmed); if (Array.isArray(arr)) { ops.push(...arr); parsedAsArray = true; } } catch (e) { /* fall back to lines */ }
+  }
+  if (!parsedAsArray) {
+    for (const line of trimmed.split('\n')) {
+      const l = line.trim().replace(/,$/, '');
+      if (!l.startsWith('{')) continue;
+      try { ops.push(JSON.parse(l)); } catch (e) { badLines++; }
+    }
+  }
+  return { css: css.trim(), ops, badLines };
+}
+
+function applyPatch(html, patch) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const notes = [];
+  let applied = 0;
+
+  const byId = (n) => {
+    const id = String(n === undefined || n === null ? '' : n).replace(/[^\d]/g, '');
+    return id ? doc.querySelector(`[data-ai="${id}"]`) : null;
+  };
+  const ownText = (el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.nodeValue.trim());
+
+  const place = (anchor, where, nodes) => {
+    const isVoid = VOID.has(anchor.tagName.toLowerCase());
+    switch (where) {
+      case 'before': anchor.before(...nodes, ' '); break;
+      case 'inside-start': isVoid ? anchor.before(...nodes, ' ') : anchor.prepend(...nodes); break;
+      case 'inside-end': isVoid ? anchor.after(' ', ...nodes) : anchor.append(...nodes); break;
+      default: anchor.after(' ', ...nodes);
+    }
+  };
+
+  const setText = (el, text) => {
+    const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) if (walker.currentNode.nodeValue.trim()) nodes.push(walker.currentNode);
+    if (!nodes.length) { el.append(text); return; }
+    nodes[0].nodeValue = text;
+    nodes.slice(1).forEach((n) => { n.nodeValue = ''; });
+  };
+
+  const setLink = (el, href) => {
+    const url = fixHref(String(href));
+    if (el.matches('a')) el.setAttribute('href', url);
+    else {
+      const a = el.querySelector('a');
+      if (a) a.setAttribute('href', url);
+      else el.setAttribute('data-href', url);   // handled by the replica's click handler
+    }
+  };
+
+  // Remove an item and tidy up so neighbours close the gap
+  const removeItem = (el) => {
+    const WRAP = new Set(['li', 'div', 'span', 'p']);
+    const CASCADE = new Set(['li', 'ul', 'ol', 'div', 'span', 'p', 'nav']);
+    let node = el;
+    while (node.parentElement && WRAP.has(node.parentElement.tagName.toLowerCase()) &&
+           node.parentElement.children.length === 1 && !ownText(node.parentElement)) {
+      node = node.parentElement;
+    }
+    const parent = node.parentElement;
+    const prev = node.previousSibling;
+    const next = node.nextSibling;
+    node.remove();
+
+    const isSep = (n) => n && n.nodeType === 3 && /^\s*[|/•·\-–—,]\s*$/.test(n.nodeValue);
+    if (isSep(next)) next.remove();
+    else if (isSep(prev)) prev.remove();
+
+    let p = parent;
+    while (p && p !== doc.body && p !== doc.documentElement &&
+           CASCADE.has(p.tagName.toLowerCase()) && p.children.length === 0 && !ownText(p)) {
+      const up = p.parentElement;
+      p.remove();
+      p = up;
+    }
+  };
+
+  for (const op of patch.ops) {
+    try {
+      const kind = String(op.op || '').toLowerCase();
+
+      if (kind === 'remove') {
+        const el = byId(op.target);
+        if (!el || el === doc.body) throw new Error('target ' + op.target + ' not found');
+        removeItem(el);
+
+      } else if (kind === 'clone') {
+        const src = byId(op.source !== undefined ? op.source : op.anchor);
+        const anchor = byId(op.anchor !== undefined ? op.anchor : op.source);
+        if (!src || !anchor) throw new Error('element ' + (op.source || op.anchor) + ' not found');
+        const copy = src.cloneNode(true);
+        [copy, ...copy.querySelectorAll('*')].forEach((e) => { e.removeAttribute('data-ai'); e.removeAttribute('id'); });
+        if (op.text !== undefined && op.text !== null) setText(copy, String(op.text));
+        if (op.href) setLink(copy, op.href);
+        place(anchor, op.where, [copy]);
+
+      } else if (kind === 'add') {
+        const anchor = byId(op.anchor);
+        if (!anchor) throw new Error('anchor ' + op.anchor + ' not found');
+        const tpl = doc.createElement('template');
+        tpl.innerHTML = String(op.html || '');
+        stripUnsafe(tpl.content);
+        tpl.content.querySelectorAll('a[href]').forEach((a) => a.setAttribute('href', fixHref(a.getAttribute('href'))));
+        place(anchor, op.where, Array.from(tpl.content.childNodes));
+
+      } else if (kind === 'settext') {
+        const el = byId(op.target);
+        if (!el) throw new Error('target ' + op.target + ' not found');
+        setText(el, String(op.text));
+
+      } else if (kind === 'setattr') {
+        const el = byId(op.target);
+        const name = String(op.name || '').toLowerCase();
+        if (!el) throw new Error('target ' + op.target + ' not found');
+        if (!name || name.startsWith('on') || name === 'srcdoc' || name === 'data-ai') throw new Error('attribute "' + name + '" not allowed');
+        let val = String(op.value === undefined ? '' : op.value);
+        if (/^\s*javascript:/i.test(val)) throw new Error('javascript: not allowed');
+        if (name === 'href' || name === 'action' || name === 'data-href') val = fixHref(val);
+        el.setAttribute(name, val);
+
+      } else if (kind === 'move') {
+        const el = byId(op.target);
+        const anchor = byId(op.anchor);
+        if (!el || !anchor || el.contains(anchor)) throw new Error('cannot move ' + op.target);
+        place(anchor, op.where, [el]);
+
+      } else {
+        throw new Error('unknown operation "' + op.op + '"');
+      }
+      applied++;
+    } catch (err) {
+      notes.push('Skipped a change: ' + err.message);
+    }
+  }
+
+  let cssApplied = false;
+  if (patch.css) {
+    let st = doc.getElementById('ai-overrides');
+    if (!st) {
+      st = doc.createElement('style');
+      st.id = 'ai-overrides';
+      doc.head.appendChild(st);
+    }
+    st.textContent += '\n' + patch.css;
+    cssApplied = true;
+  }
+
+  tagElements(doc);   // give new elements their own ids for the next edit
+  return { html: '<!DOCTYPE html>\n' + doc.documentElement.outerHTML, applied, cssApplied, notes };
 }
 
 // ---------------------------------------------------------------------------
@@ -379,21 +475,38 @@ async function pickModel(apiKey) {
 }
 
 const SYSTEM_PROMPT = [
-  'You are a senior front-end developer who rebuilds web pages.',
-  'You receive a web page (either an unstyled structure outline, or the current version of an already redesigned page) and a change request from the user.',
-  'Reply with ONE complete, self-contained HTML document that replaces the page.',
+  'You are an expert front-end developer who makes small, surgical edits to an existing web page.',
+  'You receive an outline of the page. Every element has an id like data-ai="12". The page ALREADY has its own complete design (colors, sizes, spacing, fonts, layout). Do NOT redesign it. Apply ONLY what the user asks and leave everything else exactly as it is.',
   '',
-  'RULES',
-  '1. Write ALL the CSS from scratch inside a single <style> in <head>. No CSS frameworks. You may link Google Fonts.',
-  '2. Keep EVERY link, button, form, input, select and textarea from the input: same visible text and same href / action / type / name / id / placeholder / value. Restyle them to match the new design. Only remove or rename one if the user explicitly asks.',
-  '3. If the user asks for a new button, link or menu item, add it. If they say where it goes, use <a href="https://full-url">Label</a> styled as a button, always with a full absolute URL starting with https:// (for a plain site name like "youtube" use https://www.youtube.com). For a section of this same page use href="#id" and give that section a matching id. Use <button> only for things that do not navigate. Never use javascript:, onclick or <script>.',
-  '4. Keep all text and all images (same src) unless the user asks to change them. Tokens like [[SVG:3]] and [[DATA:2]] stand for icons and long image data: leave them exactly where they are (or drop them together with the element they belong to).',
-  '5. If the input already contains a <style>, it is an already redesigned page: apply ONLY what the user asks and keep everything else identical.',
-  '6. If the input is an unstyled outline, create a polished, modern, responsive design that follows the request (colors, theme, mood). If the user gave no style details, choose a clean modern look.',
-  '7. No JavaScript, no comments, no explanations, no markdown fences. Output only the HTML, starting with <!DOCTYPE html>.'
+  'Answer in exactly this format and nothing else (no explanations, no markdown fences):',
+  '===CSS===',
+  '(CSS override rules, only for what the user asked to restyle. Leave empty if there is nothing to restyle.)',
+  '===OPS===',
+  '(one JSON object per line. Leave empty if there is nothing to add, remove or change.)',
+  '',
+  'CSS RULES',
+  '- Select with [data-ai="N"] (comma-separate several) or with classes / ids / tag names that appear in the outline. Never invent class names.',
+  '- Put !important on every declaration.',
+  '- Touch only what the user mentioned. Never restyle anything else. Never hide things with display:none: use the remove operation instead.',
+  '- For "all buttons" style the tag/classes those buttons really use (or list their data-ai selectors).',
+  '',
+  'OPERATIONS (N is a data-ai number)',
+  '{"op":"remove","target":N}',
+  '{"op":"clone","source":N,"anchor":N,"where":"after","text":"Label","href":"https://example.com"}   (new button/link/menu item that looks exactly like existing element N)',
+  '{"op":"add","anchor":N,"where":"after","html":"<a href=\\"https://example.com\\">Label</a>"}   (only when there is nothing similar to clone)',
+  '{"op":"setText","target":N,"text":"New text"}',
+  '{"op":"setAttr","target":N,"name":"href","value":"https://example.com"}',
+  '{"op":"move","target":N,"anchor":N,"where":"before"}',
+  'where is one of: before, after, inside-start, inside-end.',
+  '',
+  'OPERATION RULES',
+  '- To add a button, link or menu item, ALWAYS prefer "clone" of the most similar existing element so it automatically gets the same size, colors and font. Put it next to its siblings with anchor + where. Do not restyle the clone unless the user asked.',
+  '- To remove something, target the outermost element that exists only for that item (for example the <li> or wrapper <div> around a button), so the neighbours close the gap. Remove only what the user named.',
+  '- Redirects: href must be a full absolute URL starting with https:// (a plain site name like "youtube" becomes https://www.youtube.com). To jump to a section of this same page use "#id" of an element that has an id attribute.',
+  '- Keep every other button, link and form untouched. No JavaScript, no onclick, no <script>.'
 ].join('\n');
 
-async function generatePage({ apiKey, promptText, outline, url, isEdited }) {
+async function generatePage({ apiKey, promptText, outline, url }) {
   const model = await pickModel(apiKey);
   let scale = 1;
 
@@ -401,8 +514,8 @@ async function generatePage({ apiKey, promptText, outline, url, isEdited }) {
     const input = scale < 1 ? outline.slice(0, Math.floor(outline.length * scale)) : outline;
     const userMessage =
       'Page URL: ' + (url || 'unknown') + '\n' +
-      'Current page: ' + (isEdited ? 'an already redesigned page (keep everything the request does not mention)' : 'unstyled page structure (design everything from scratch)') + '\n' +
-      'User request: ' + promptText + '\n\n' + input;
+      'User request: ' + promptText + '\n\n' +
+      'Page outline:\n' + input;
 
     const response = await fetch(GROQ_BASE + '/chat/completions', {
       method: 'POST',
@@ -413,7 +526,7 @@ async function generatePage({ apiKey, promptText, outline, url, isEdited }) {
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: userMessage }
         ],
-        temperature: 0.3,
+        temperature: 0.2,
         max_completion_tokens: Math.floor(MAX_OUTPUT_TOKENS * scale)
       })
     });
@@ -464,36 +577,35 @@ async function applyChanges() {
 
   try {
     const current = state.versions[state.index];
-    const isEdited = state.index > 0;
 
     log('Step 1: Reading the page structure, buttons and links...', 'info');
-    const { text, assets, truncated } = buildOutline(current.html, { keepStyle: isEdited, maxChars: MAX_INPUT_CHARS });
-    log(`Sent ${text.length.toLocaleString()} characters of the ${isEdited ? 'current page' : 'page structure'} to the AI.`, 'dim');
+    const { text, truncated } = buildOutline(current.html, MAX_INPUT_CHARS);
+    log(`Sent ${text.length.toLocaleString()} characters of the page outline to the AI.`, 'dim');
     if (truncated) log('This page is large: only the first part could be sent. Raise MAX_INPUT_CHARS in app.js if your Groq plan allows it.', 'dim');
 
-    log('Step 2 & 3: Rebuilding HTML and CSS from scratch...', 'info');
-    const { raw, model, cut } = await generatePage({ apiKey, promptText, outline: text, url: state.url, isEdited });
+    log('Step 2 & 3: Asking the AI for the changes...', 'info');
+    const { raw, model, cut } = await generatePage({ apiKey, promptText, outline: text, url: state.url });
 
-    const html = extractHtml(raw);
-    if (!html) throw new Error('[' + model + '] returned no usable HTML.');
-    if (cut) log('The AI hit its length limit, so the bottom of the page may be missing. Raise MAX_OUTPUT_TOKENS in app.js if your plan allows it.', 'dim');
+    const patch = parsePatch(raw);
+    if (!patch.css && !patch.ops.length) throw new Error('[' + model + '] returned no changes. Try describing the change more specifically.');
+    if (cut) log('The AI hit its length limit, so some changes may be missing. Raise MAX_OUTPUT_TOKENS in app.js if your plan allows it.', 'dim');
+    if (patch.badLines) log(patch.badLines + ' change line(s) from the AI were unreadable and ignored.', 'dim');
 
-    const finalHtml = buildFinalHtml(html, { assets, baseUrl: state.base, fixLinks: true });
-    const check = new DOMParser().parseFromString(finalHtml, 'text/html');
-    if (!check.body || (!check.body.textContent.trim() && !check.body.querySelector('img, svg, input, button'))) {
-      throw new Error('[' + model + '] returned an empty page.');
-    }
+    const result = applyPatch(current.html, patch);
+    result.notes.forEach((n) => log(n, 'dim'));
+    if (!result.applied && !result.cssApplied) throw new Error('None of the AI\'s changes could be applied. Try rephrasing your request.');
+    log(`Applied ${result.applied} page change(s)${result.cssApplied ? ' + style changes' : ''}.`, 'dim');
 
     // New edit: drop any redo history after the current position
     state.versions = state.versions.slice(0, state.index + 1);
-    state.versions.push({ prompt: promptText, html: finalHtml });
+    state.versions.push({ prompt: promptText, html: result.html });
     state.index = state.versions.length - 1;
     state.showOriginal = false;
 
     log('Showing the new version in the replica...', 'dim');
     render();
     persist();
-    log('SUCCESS: Page rebuilt!', 'info');
+    log('SUCCESS: Changes applied!', 'info');
 
     minimizePanel();            // the tab stays open; the box just folds away
     ok = true;
@@ -549,7 +661,7 @@ function goTo(index) {
   try { host = new URL(rec.url).hostname; } catch (e) { /* keep url */ }
   document.title = 'AI Web Customizer – ' + (rec.title || host);
 
-  const original = buildFinalHtml(rec.html, { assets: null, baseUrl: state.base, fixLinks: false });
+  const original = buildFinalHtml(rec.html, state.base);
   state.versions = [{ prompt: 'Original', html: original }];
 
   const saved = savedObj && savedObj[id + '_edits'];
